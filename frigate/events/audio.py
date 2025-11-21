@@ -4,6 +4,9 @@ import datetime
 import logging
 import threading
 import time
+# Added imports
+import io
+import wave
 from multiprocessing.managers import DictProxy
 from multiprocessing.synchronize import Event as MpEvent
 from typing import Tuple
@@ -36,6 +39,8 @@ from frigate.data_processing.real_time.audio_transcription import (
 from frigate.ffmpeg_presets import parse_preset_input
 from frigate.log import LogPipe, redirect_output_to_logger
 from frigate.object_detection.base import load_labels
+# Added import for audio extraction
+from frigate.util.audio import get_audio_from_recording
 from frigate.util.builtin import get_ffmpeg_arg_list
 from frigate.util.process import FrigateProcess
 from frigate.video import start_or_restart_ffmpeg, stop_ffmpeg
@@ -166,6 +171,8 @@ class AudioEventMaintainer(threading.Thread):
         self.audio_transcription_model_runner = audio_transcription_model_runner
         self.transcription_processor = None
         self.transcription_thread = None
+        # Cooldown for speech clip logging
+        self.last_speech_clip_time = 0
 
         # create communication for audio detections
         self.requestor = InterProcessRequestor()
@@ -231,6 +238,12 @@ class AudioEventMaintainer(threading.Thread):
                 ).get("threshold", 0.8):
                     audio_detections.append((label, score))
 
+            # Check for speech to trigger clip transcription
+            for label, score in audio_detections:
+                if label == "speech":
+                    self.handle_speech_clip_transcription()
+                    break
+
             # send audio detection data
             self.detection_publisher.publish(
                 (
@@ -260,6 +273,63 @@ class AudioEventMaintainer(threading.Thread):
                 )
             else:
                 self.transcription_processor.check_unload_model()
+
+    def handle_speech_clip_transcription(self):
+        """Check cooldown and start thread to transcribe speech from clip."""
+        now = datetime.datetime.now().timestamp()
+        if now - self.last_speech_clip_time < 10:
+            return
+        
+        self.last_speech_clip_time = now
+        threading.Thread(target=self._process_speech_clip, daemon=True).start()
+
+    def _process_speech_clip(self):
+        """Retrieve audio clip from recording, transcribe, and log."""
+        if not self.audio_transcription_model_runner:
+            return
+
+        # Wait briefly for the recording to be written to disk
+        time.sleep(2.0)
+
+        end_ts = datetime.datetime.now().timestamp()
+        start_ts = end_ts - 5 # Get last 5 seconds
+
+        try:
+            audio_bytes = get_audio_from_recording(
+                self.camera_config.ffmpeg,
+                self.camera_config.name,
+                start_ts,
+                end_ts
+            )
+
+            if not audio_bytes:
+                self.logger.debug("No audio clip retrieved for speech transcription")
+                return
+
+            # Convert WAV bytes to float32 numpy array for Sherpa
+            # get_audio_from_recording defaults to 16kHz mono
+            with io.BytesIO(audio_bytes) as wav_io:
+                with wave.open(wav_io, 'rb') as wf:
+                    frames = wf.readframes(wf.getnframes())
+                    audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+
+            text = ""
+            
+            # Transcribe using the existing model runner (assuming Sherpa/small model)
+            if self.audio_transcription_model_runner.model:
+                stream = self.audio_transcription_model_runner.model.create_stream()
+                stream.accept_waveform(16000, audio_data)
+                while self.audio_transcription_model_runner.model.is_ready(stream):
+                    self.audio_transcription_model_runner.model.decode_stream(stream)
+                text = self.audio_transcription_model_runner.model.get_result(stream).strip()
+            
+            if text:
+                self.logger.info(f"SPEECH DETECTED IN CLIP: '{text}'")
+            else:
+                self.logger.info("Speech detected but no transcription generated from clip.")
+
+        except Exception as e:
+            self.logger.error(f"Failed to transcribe speech clip: {e}")
 
     def calculate_audio_levels(self, audio_as_float: np.float32) -> Tuple[float, float]:
         # Calculate RMS (Root-Mean-Square) which represents the average signal amplitude
