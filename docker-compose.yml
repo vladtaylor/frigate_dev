@@ -24,9 +24,9 @@ services:
     #                     capabilities: [gpu]
     environment:
       YOLO_MODELS: ""
-    # devices:
-      # - /dev/bus/usb:/dev/bus/usb # Uncomment for Google Coral USB
-      # - /dev/dri:/dev/dri # for intel hwaccel, needs to be updated for your hardware
+    devices:
+      - /dev/dri/renderD129:/dev/dri/renderD129
+      - /dev/dri/card1:/dev/dri/card1
     volumes:
       - .:/workspace/frigate:cached
       - ./web/dist:/opt/frigate/web:cached
@@ -34,6 +34,13 @@ services:
       - ./config:/config
       - ./debug:/media/frigate
      # - /dev/bus/usb:/dev/bus/usb # Uncomment for Google Coral USB
+    ports:
+      - "11984:1984" #rtsp web interface
+      - "18971:8971"
+      - "15000:5000"
+      - "18554:8554" # RTSP feeds
+      - "18555:8555/tcp" # WebRTC over tcp
+      - "18555:8555/udp" # WebRTC over udp
   mqtt:
     container_name: mqtt
     image: eclipse-mosquitto:2.0
