@@ -290,6 +290,9 @@ COPY docker/main/fake_frigate_run /etc/s6-overlay/s6-rc.d/frigate/run
 RUN mkdir -p /opt/frigate \
     && ln -svf /workspace/frigate/frigate /opt/frigate/frigate
 
+# Add /opt/frigate to PYTHONPATH so scripts in /usr/local/ can find the frigate module
+ENV PYTHONPATH="/opt/frigate"
+
 # Install Node 20
 RUN curl -SLO https://deb.nodesource.com/nsolid_setup_deb.sh && \
     chmod 500 nsolid_setup_deb.sh && \
